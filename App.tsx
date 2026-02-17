@@ -42,7 +42,7 @@ import {
   UserCheck,
   Library,
   UserCircle,
-  Settings as SettingsIcon,
+  Settings,
 } from "lucide-react";
 
 import { auth, db } from "./firebase";
@@ -51,7 +51,6 @@ import {
   addDoc,
   collection,
   doc,
-  getDoc,
   onSnapshot,
   orderBy,
   query,
@@ -60,18 +59,25 @@ import {
   updateDoc,
 } from "firebase/firestore";
 
+/** Change l’équipe ici si tu veux */
 const TEAM_ID = "equipe1";
 
-/** ✅ IMPORTANT : Firestore refuse "undefined". On nettoie avant d'écrire. */
-function stripUndefined<T extends Record<string, any>>(obj: T): Partial<T> {
-  const out: Record<string, any> = {};
+/** -----------------------------
+ *  Helpers Firestore (IMPORTANT)
+ *  Firestore n’accepte PAS undefined.
+ *  ----------------------------- */
+function stripUndefined<T extends Record<string, any>>(obj: T): T {
+  const cleaned: any = {};
   Object.keys(obj).forEach((k) => {
     const v = obj[k];
-    if (v !== undefined) out[k] = v;
+    if (v !== undefined) cleaned[k] = v;
   });
-  return out as Partial<T>;
+  return cleaned;
 }
 
+/** -----------------------------
+ *  Tes users/settings par défaut
+ *  ----------------------------- */
 const FULL_ACCESS: Permission[] = [
   "punch",
   "envoi",
@@ -137,7 +143,7 @@ const DEFAULT_SETTINGS: AppSettings = {
 function createNewBillet(issuerName: string = ""): BilletData {
   const now = new Date();
   return {
-    id: `EV-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}-${Math.floor(1000 + Math.random() * 8999)}`,
+    id: `EV-${now.getFullYear()}${(now.getMonth() + 1).toString().padStart(2, "0")}-${Math.floor(1000 + Math.random() * 8999)}`,
     date: now.toISOString().split("T")[0],
     time: now.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }),
     issuerName,
@@ -156,61 +162,75 @@ const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
   const [view, setView] = useState<ViewMode>("login");
 
-  // ✅ Ces 4 states sont maintenant SYNC Firestore (tous les téléphones)
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [history, setHistory] = useState<BilletData[]>([]);
   const [punchLogs, setPunchLogs] = useState<PunchLog[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
-
   const [billet, setBillet] = useState<BilletData>(() => createNewBillet());
 
-  // 1) Auth anonyme
+  /** 1) Auth anonyme (obligatoire pour lire/écrire si règles auth) */
   useEffect(() => {
     signInAnonymously(auth).catch(console.error);
   }, []);
 
-  // 2) SETTINGS realtime (doc unique)
+  /** 2) SETTINGS en temps réel : teams/{TEAM_ID}/settings/main */
   useEffect(() => {
     const ref = doc(db, "teams", TEAM_ID, "settings", "main");
-    const unsub = onSnapshot(ref, async (snap) => {
+
+    return onSnapshot(ref, async (snap) => {
       if (snap.exists()) {
-        setSettings(snap.data() as AppSettings);
+        const data = snap.data() as AppSettings;
+        // sécurité: champs manquants
+        setSettings({
+          ...DEFAULT_SETTINGS,
+          ...data,
+          users: data.users?.length ? data.users : DEFAULT_SETTINGS.users,
+        });
       } else {
+        // 1ère fois: crée settings par défaut dans Firestore
         await setDoc(ref, DEFAULT_SETTINGS);
         setSettings(DEFAULT_SETTINGS);
       }
     });
-    return () => unsub();
   }, []);
 
-  // 3) PUNCH LOGS realtime
+  /** 3) PUNCH LOGS en temps réel : teams/{TEAM_ID}/logs */
   useEffect(() => {
     const q = query(collection(db, "teams", TEAM_ID, "logs"), orderBy("createdAt", "asc"));
-    const unsub = onSnapshot(q, (snap) => {
-      const next = snap.docs.map((d) => ({ ...(d.data() as any), id: (d.data() as any).id ?? d.id })) as PunchLog[];
+    return onSnapshot(q, (snap) => {
+      const next = snap.docs.map((d) => {
+        const data = d.data() as any;
+        // PunchLog exige id: string
+        const log: PunchLog = {
+          id: data.id ?? d.id,
+          employeeName: data.employeeName,
+          type: data.type,
+          timestamp: data.timestamp,
+          plaque: data.plaque,
+          lunchMinutes: data.lunchMinutes,
+        };
+        return log;
+      });
       setPunchLogs(next);
     });
-    return () => unsub();
   }, []);
 
-  // 4) HISTORY realtime
+  /** 4) HISTORY billets en temps réel : teams/{TEAM_ID}/history */
   useEffect(() => {
-    const q = query(collection(db, "teams", TEAM_ID, "history"), orderBy("date", "desc"));
-    const unsub = onSnapshot(q, (snap) => {
+    const q = query(collection(db, "teams", TEAM_ID, "history"), orderBy("createdAt", "desc"));
+    return onSnapshot(q, (snap) => {
       const next = snap.docs.map((d) => ({ ...(d.data() as any), id: d.id })) as BilletData[];
       setHistory(next);
     });
-    return () => unsub();
   }, []);
 
-  // 5) APPROVALS realtime
+  /** 5) APPROVALS en temps réel : teams/{TEAM_ID}/approvals */
   useEffect(() => {
-    const q = query(collection(db, "teams", TEAM_ID, "approvals"), orderBy("approvalDate", "desc"));
-    const unsub = onSnapshot(q, (snap) => {
+    const q = query(collection(db, "teams", TEAM_ID, "approvals"), orderBy("createdAt", "desc"));
+    return onSnapshot(q, (snap) => {
       const next = snap.docs.map((d) => ({ ...(d.data() as any), id: d.id })) as ApprovalRecord[];
       setApprovals(next);
     });
-    return () => unsub();
   }, []);
 
   const hasPermission = (p: Permission) => currentUser?.permissions.includes(p);
@@ -219,42 +239,26 @@ const App: React.FC = () => {
     if (!currentUser) return false;
     if (["admin", "surintendant", "chargée_de_projet"].includes(currentUser.role)) return true;
 
-    const userLogs = punchLogs.filter((l) => l.employeeName === currentUser.name);
+    const userLogs = punchLogs.filter((log) => log.employeeName === currentUser.name);
     if (userLogs.length === 0) return false;
-
-    const parseTs = (ts: string) => {
-      const cleaned = ts.replace(",", "");
-      const parts = cleaned.split(/\s+/);
-      const datePart = parts[0] ?? "";
-      const timePart = parts[1] ?? "00:00";
-      const [dd, mm, yyyy] = datePart.split("/").map(Number);
-      const [hh, min] = timePart.split(":").map(Number);
-      return new Date(yyyy, (mm || 1) - 1, dd || 1, hh || 0, min || 0).getTime();
-    };
-
-    const sorted = [...userLogs].sort((a, b) => parseTs(b.timestamp) - parseTs(a.timestamp));
-    return sorted[0].type === "in";
+    const last = userLogs[userLogs.length - 1];
+    return last.type === "in";
   };
 
   const handleLogin = (user: UserAccount) => {
     setCurrentUser(user);
 
-    const userLogs = punchLogs.filter((l) => l.employeeName === user.name);
-    const parseTs = (ts: string) => {
-      const cleaned = ts.replace(",", "");
-      const parts = cleaned.split(/\s+/);
-      const datePart = parts[0] ?? "";
-      const timePart = parts[1] ?? "00:00";
-      const [dd, mm, yyyy] = datePart.split("/").map(Number);
-      const [hh, min] = timePart.split(":").map(Number);
-      return new Date(yyyy, (mm || 1) - 1, dd || 1, hh || 0, min || 0).getTime();
-    };
-    const sorted = [...userLogs].sort((a, b) => parseTs(b.timestamp) - parseTs(a.timestamp));
-
-    const currentlyIn = sorted.length > 0 && sorted[0].type === "in";
     const isFreeAccess = ["admin", "surintendant", "chargée_de_projet"].includes(user.role);
+    if (isFreeAccess) {
+      setView("home");
+      return;
+    }
 
-    if (!isFreeAccess && !currentlyIn) setView("punch");
+    const userLogs = punchLogs.filter((log) => log.employeeName === user.name);
+    const last = userLogs[userLogs.length - 1];
+    const currentlyIn = last?.type === "in";
+
+    if (!currentlyIn) setView("punch");
     else setView("home");
   };
 
@@ -263,79 +267,86 @@ const App: React.FC = () => {
     setView("login");
   };
 
-  // ✅ SETTINGS -> Firestore (sync tous téléphones)
+  /** SAVE SETTINGS -> Firestore (synchro tous téléphones) */
   const saveSettings = async (newSettings: AppSettings) => {
     setSettings(newSettings);
     const ref = doc(db, "teams", TEAM_ID, "settings", "main");
-    await setDoc(ref, newSettings, { merge: false });
+    await setDoc(ref, newSettings);
   };
 
-  const updateSettingsList = async (key: keyof Omit<AppSettings, "users">, newValue: string) => {
+  const updateSettingsList = (key: keyof Omit<AppSettings, "users">, newValue: string) => {
     const newSettings = { ...settings, [key]: [...(settings[key] as string[]), newValue] };
-    await saveSettings(newSettings);
+    saveSettings(newSettings).catch(console.error);
   };
 
-  const removeSettingsOption = async (key: keyof Omit<AppSettings, "users">, valueToRemove: string) => {
+  const removeSettingsOption = (key: keyof Omit<AppSettings, "users">, valueToRemove: string) => {
     const currentList = settings[key] as string[];
     const newSettings = { ...settings, [key]: currentList.filter((item) => item !== valueToRemove) };
-    await saveSettings(newSettings);
+    saveSettings(newSettings).catch(console.error);
   };
 
-  // ✅ PUNCH -> Firestore (corrige undefined lunchMinutes)
+  /** PUNCH -> Firestore (IMPORTANT: pas de undefined) */
   const savePunch = async (log: PunchLog) => {
-    const payload = stripUndefined({
+    // ✅ Fix principal: Firestore refuse undefined
+    const safeLog = stripUndefined({
       ...log,
-      lunchMinutes: log.lunchMinutes ?? 0, // 🔥 IMPORTANT: pas undefined
+      // si lunchMinutes est vide, on l’enlève. (ou mets 0/30 si tu veux)
+      lunchMinutes: log.lunchMinutes ?? undefined,
+      plaque: log.plaque?.trim() ? log.plaque.trim().toUpperCase() : undefined,
       createdAt: serverTimestamp(),
     });
 
-    await addDoc(collection(db, "teams", TEAM_ID, "logs"), payload);
+    await addDoc(collection(db, "teams", TEAM_ID, "logs"), safeLog);
 
-    // auto-ajout plaque dans settings
-    if (log.type === "in" && log.plaque && log.plaque.trim() !== "") {
-      const normalized = log.plaque.trim().toUpperCase();
-      const targetUser = settings.users.find((u) => u.name === log.employeeName);
-      if (targetUser?.role === "chauffeur" && !settings.plaques.includes(normalized)) {
-        await updateSettingsList("plaques", normalized);
+    // auto-ajout plaque dans settings (si chauffeur)
+    if (safeLog.type === "in" && safeLog.plaque) {
+      const targetUser = settings.users.find((u) => u.name === safeLog.employeeName);
+      if (targetUser?.role === "chauffeur" && !settings.plaques.includes(safeLog.plaque)) {
+        updateSettingsList("plaques", safeLog.plaque);
       }
     }
 
     const isPunchOnly = currentUser?.permissions.length === 1 && currentUser.permissions[0] === "punch";
-    if (log.type === "in" && !isPunchOnly) setView("home");
+    if (safeLog.type === "in" && !isPunchOnly) setView("home");
   };
 
-  // ✅ BILLET -> Firestore
+  /** BILLET -> preview */
   const handleSaveBillet = (data: BilletData) => {
     setBillet(data);
     setView("preview");
   };
 
+  /** FINALIZE billet -> Firestore */
   const finalizeBillet = async () => {
     const payload = stripUndefined({
       ...billet,
       createdAt: serverTimestamp(),
-      status: billet.status ?? "pending",
     });
 
     await addDoc(collection(db, "teams", TEAM_ID, "history"), payload);
+
     alert("Billet créé et envoyé !");
     setView("home");
   };
 
-  // ✅ Reception approve -> Firestore (update doc)
+  /** Approver billet -> update Firestore (optionnel si ton ReceptionView utilise déjà autre chose) */
   const approveBillet = async (id: string, updatedData?: Partial<BilletData>) => {
     const ref = doc(db, "teams", TEAM_ID, "history", id);
-    await updateDoc(ref, stripUndefined({
-      ...(updatedData || {}),
-      status: "approved",
-      approvalDate: new Date().toLocaleString("fr-FR"),
-      approverName: currentUser?.name,
-    }) as any);
+    await updateDoc(
+      ref,
+      stripUndefined({
+        ...(updatedData || {}),
+        status: "approved",
+        approvalDate: new Date().toLocaleString("fr-FR"),
+        approverName: currentUser?.name,
+      })
+    );
   };
 
-  // ✅ Approvals -> Firestore
+  /** Approver heures -> Firestore */
   const handleApproveHours = async (employeeName: string, date: string, totalMs: number, lunchMs?: number) => {
-    const payload = stripUndefined({
+    const payload: ApprovalRecord = {
+      id: `APP-${Date.now()}`, // on garde un id dans data, mais Firestore aura aussi son doc id
       employeeName,
       date,
       totalMs,
@@ -343,48 +354,52 @@ const App: React.FC = () => {
       status: "approved",
       approverName: currentUser?.name,
       approvalDate: new Date().toLocaleString("fr-FR"),
-      createdAt: serverTimestamp(),
-    });
+    };
 
-    await addDoc(collection(db, "teams", TEAM_ID, "approvals"), payload);
+    await addDoc(collection(db, "teams", TEAM_ID, "approvals"), stripUndefined({ ...payload, createdAt: serverTimestamp() }));
   };
 
-  if (view === "login") return <LoginView users={settings.users} onLogin={handleLogin} />;
+  /** Safety settings */
+  const safeSettings = useMemo(() => {
+    return {
+      ...settings,
+      users: settings?.users ?? [],
+      issuers: settings?.issuers ?? [],
+      clients: settings?.clients ?? [],
+      provenances: settings?.provenances ?? [],
+      destinations: settings?.destinations ?? [],
+      plaques: settings?.plaques ?? [],
+      typeSols: settings?.typeSols ?? [],
+      quantites: settings?.quantites ?? [],
+      transporteurs: settings?.transporteurs ?? [],
+    } as AppSettings;
+  }, [settings]);
+
+  /** UI */
+  if (view === "login") return <LoginView users={safeSettings.users} onLogin={handleLogin} />;
 
   const activeSession = isPunchedIn();
   const isPunchOnly = currentUser?.permissions.length === 1 && currentUser.permissions[0] === "punch";
-
-  const safeSettings = useMemo(
-    () =>
-      ({
-        ...settings,
-        users: settings.users ?? [],
-        provenances: settings.provenances ?? [],
-        issuers: settings.issuers ?? [],
-        clients: settings.clients ?? [],
-        destinations: settings.destinations ?? [],
-        plaques: settings.plaques ?? [],
-        typeSols: settings.typeSols ?? [],
-        quantites: settings.quantites ?? [],
-        transporteurs: settings.transporteurs ?? [],
-      } as AppSettings),
-    [settings]
-  );
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col max-w-md mx-auto shadow-2xl relative overflow-x-hidden border-x border-slate-200">
       <header className="bg-black text-white p-3 shadow-lg sticky top-0 z-20 flex justify-between items-center">
         <div className="flex flex-col items-start cursor-pointer" onClick={() => !isPunchOnly && setView("home")}>
-          <span className="text-[8px] font-black tracking-[0.3em] mb-0.5 uppercase opacity-60">Logistique / Transport</span>
+          <span className="text-[8px] font-black tracking-[0.3em] mb-0.5 uppercase opacity-60">
+            Logistique / Transport
+          </span>
           <h1 className="text-2xl font-black italic tracking-tighter leading-none text-white">
             GROUPE <span className="text-[#76a73c]">DDL</span>
           </h1>
         </div>
+
         <div className="flex gap-1 items-center">
           <div className="mr-2 text-right">
             <div className="text-[8px] font-black uppercase opacity-50">Session</div>
             <div className="text-[10px] font-black text-[#76a73c] uppercase leading-none">{currentUser?.name}</div>
-            {currentUser?.group && <div className="text-[7px] font-black text-white/40 uppercase tracking-widest">{currentUser.group}</div>}
+            {currentUser?.group && (
+              <div className="text-[7px] font-black text-white/40 uppercase tracking-widest">{currentUser.group}</div>
+            )}
           </div>
 
           {view !== "home" && !isPunchOnly && (
@@ -399,11 +414,15 @@ const App: React.FC = () => {
               onClick={() => setView("settings")}
               className={`p-2 rounded-lg ${view === "settings" ? "bg-[#76a73c]" : "bg-white/10 hover:bg-white/20"}`}
             >
-              <SettingsIcon className="w-4 h-4" />
+              <Settings className="w-4 h-4" />
             </button>
           )}
 
-          <button title="Déconnexion" onClick={handleLogout} className="p-2 rounded-lg bg-red-500/20 hover:bg-red-500/40 text-red-400">
+          <button
+            title="Déconnexion"
+            onClick={handleLogout}
+            className="p-2 rounded-lg bg-red-500/20 hover:bg-red-500/40 text-red-400"
+          >
             <LogOut className="w-4 h-4" />
           </button>
         </div>
@@ -414,8 +433,12 @@ const App: React.FC = () => {
           <div className="p-6 space-y-6 animate-in fade-in duration-500">
             <div className="text-center mb-4">
               <h2 className="text-2xl font-black uppercase italic text-black tracking-tighter">Menu Principal</h2>
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Bienvenue, {currentUser?.name}</p>
-              {currentUser?.group && <p className="text-[8px] font-black text-[#76a73c] uppercase tracking-widest mt-1">{currentUser.group}</p>}
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                Bienvenue, {currentUser?.name}
+              </p>
+              {currentUser?.group && (
+                <p className="text-[8px] font-black text-[#76a73c] uppercase tracking-widest mt-1">{currentUser.group}</p>
+              )}
             </div>
 
             {!activeSession && (
@@ -527,11 +550,24 @@ const App: React.FC = () => {
 
         {view === "approval_menu" && <ApprovalMenuView onBack={() => setView("home")} onNavigate={(v) => setView(v)} />}
         {view === "approval_pending" && (
-          <ApprovalPendingView logs={punchLogs} users={safeSettings.users} approvals={approvals} onApprove={handleApproveHours} onBack={() => setView("approval_menu")} currentUser={currentUser} />
+          <ApprovalPendingView
+            logs={punchLogs}
+            users={safeSettings.users}
+            approvals={approvals}
+            onApprove={handleApproveHours}
+            onBack={() => setView("approval_menu")}
+            currentUser={currentUser}
+          />
         )}
         {view === "approval_list" && <ApprovalListView approvals={approvals} onBack={() => setView("approval_menu")} />}
         {view === "approval_summary" && (
-          <ApprovalSummaryView logs={punchLogs} users={safeSettings.users} approvals={approvals} onBack={() => setView("approval_menu")} currentUser={currentUser} />
+          <ApprovalSummaryView
+            logs={punchLogs}
+            users={safeSettings.users}
+            approvals={approvals}
+            onBack={() => setView("approval_menu")}
+            currentUser={currentUser}
+          />
         )}
 
         {view === "archives" && (
@@ -539,10 +575,12 @@ const App: React.FC = () => {
             <button onClick={() => setView("home")} className="flex items-center gap-1 text-black font-black uppercase text-[10px] bg-slate-200 px-3 py-1.5 rounded-lg mb-4">
               <ArrowLeft className="w-3 h-3" /> Retour Accueil
             </button>
+
             <div className="text-center mb-8">
               <h2 className="text-2xl font-black uppercase italic text-black tracking-tighter">Consultation</h2>
               <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Accédez aux archives et aux statistiques</p>
             </div>
+
             <div className="grid gap-4">
               <button onClick={() => setView("punch_report")} className="flex items-center justify-between p-6 bg-white border-2 border-slate-200 rounded-3xl hover:border-[#76a73c] transition-all active:scale-95 shadow-sm group">
                 <div className="flex items-center gap-4">
@@ -593,7 +631,9 @@ const App: React.FC = () => {
           <DriverCompilationView logs={punchLogs} users={safeSettings.users} history={history} approvals={approvals} onBack={() => setView("archives")} />
         )}
         {view === "approved_compilation" && <ApprovedCompilationView history={history} onBack={() => setView("archives")} />}
-        {view === "punch_report" && <PunchReportView logs={punchLogs} users={safeSettings.users} history={history} approvals={approvals} onBack={() => setView("archives")} />}
+        {view === "punch_report" && (
+          <PunchReportView logs={punchLogs} users={safeSettings.users} history={history} approvals={approvals} onBack={() => setView("archives")} />
+        )}
 
         {view === "punch" && (
           <PunchView
@@ -611,7 +651,13 @@ const App: React.FC = () => {
             <button onClick={() => setView("home")} className="flex items-center gap-1 text-black font-black uppercase text-[10px] bg-slate-200 px-3 py-1.5 rounded-lg mb-4">
               <ArrowLeft className="w-3 h-3" /> Retour
             </button>
-            <BilletForm data={billet} settings={safeSettings} onSave={handleSaveBillet} onAddSettingOption={updateSettingsList} onRemoveSettingOption={removeSettingsOption} />
+            <BilletForm
+              data={billet}
+              settings={safeSettings}
+              onSave={handleSaveBillet}
+              onAddSettingOption={updateSettingsList}
+              onRemoveSettingOption={removeSettingsOption}
+            />
           </div>
         )}
 
@@ -624,7 +670,7 @@ const App: React.FC = () => {
             </button>
             <BilletPreview data={billet} />
             <button
-              onClick={finalizeBillet}
+              onClick={() => finalizeBillet().catch(console.error)}
               className="w-full mt-6 py-4 bg-[#76a73c] text-white font-black uppercase italic rounded-xl shadow-lg flex items-center justify-center gap-2 active:scale-95 transition-transform"
             >
               <Download className="w-5 h-5" /> Confirmer & Créer
@@ -648,7 +694,7 @@ const App: React.FC = () => {
             <button onClick={() => setView("home")} className="mb-4 text-xs font-black uppercase flex items-center gap-1">
               <ArrowLeft className="w-4 h-4" /> Retour
             </button>
-            <SettingsView settings={safeSettings} onSave={(s) => { saveSettings(s); setView("home"); }} />
+            <SettingsView settings={safeSettings} onSave={(s) => saveSettings(s).then(() => setView("home")).catch(console.error)} />
           </div>
         )}
       </main>
@@ -661,4 +707,5 @@ const App: React.FC = () => {
 };
 
 export default App;
+
 
