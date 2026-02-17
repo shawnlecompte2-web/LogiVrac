@@ -1,0 +1,7 @@
+{
+  "name": "LogiVrac 2.0",
+  "description": "Une application professionnelle pour créer, signer et partager des billets de disposition directement depuis votre smartphone.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
