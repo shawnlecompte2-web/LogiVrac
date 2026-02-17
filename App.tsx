@@ -1,5 +1,5 @@
-
-import React, { useEffect, useState } from "react";
+// src/App.tsx
+import React, { useEffect, useMemo, useState } from "react";
 import {
   BilletData,
   ViewMode,
@@ -27,6 +27,7 @@ import ApprovedCompilationView from "./components/ApprovedCompilationView";
 import DriverCompilationView from "./components/DriverCompilationView";
 
 import {
+  Settings,
   ArrowLeft,
   Download,
   FileBarChart,
@@ -43,34 +44,24 @@ import {
   UserCheck,
   Library,
   UserCircle,
-  Settings,
 } from "lucide-react";
 
 import { auth, db } from "./firebase";
 import { signInAnonymously } from "firebase/auth";
 import {
   collection,
+  deleteDoc,
   doc,
   onSnapshot,
-  query,
   orderBy,
+  query,
   serverTimestamp,
   setDoc,
   updateDoc,
 } from "firebase/firestore";
 
-// =========================
-// FIRESTORE PATHS
-// =========================
-const TEAM_ID = "equipe1";
-const SETTINGS_DOC = doc(db, "teams", TEAM_ID, "settings", "main");
-const LOGS_COL = collection(db, "teams", TEAM_ID, "logs");
-const HISTORY_COL = collection(db, "teams", TEAM_ID, "history");
-const APPROVALS_COL = collection(db, "teams", TEAM_ID, "approvals");
+const TEAM_ID = "equipe1"; // ✅ même TEAM_ID pour tous les téléphones = mêmes données
 
-// =========================
-// USERS / DEFAULTS (TES DONNÉES)
-// =========================
 const FULL_ACCESS: Permission[] = [
   "punch",
   "envoi",
@@ -133,85 +124,95 @@ const DEFAULT_SETTINGS: AppSettings = {
   users: [SHAWN_USER, ...NEW_USERS_LIST],
 };
 
-// =========================
-// APP
-// =========================
+function createNewBillet(issuerName: string = ""): BilletData {
+  const now = new Date();
+  return {
+    id: `EV-${now.getFullYear()}${(now.getMonth() + 1).toString().padStart(2, "0")}-${Math.floor(
+      1000 + Math.random() * 8999
+    )}`,
+    date: now.toISOString().split("T")[0],
+    time: now.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }),
+    issuerName,
+    clientName: "",
+    provenance: "",
+    destination: "",
+    plaque: "",
+    typeSol: "",
+    quantite: "",
+    transporteur: "",
+    status: "pending",
+  };
+}
+
 const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
   const [view, setView] = useState<ViewMode>("login");
 
-  // ✅ Ces 4 states sont maintenant Firestore LIVE
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [history, setHistory] = useState<BilletData[]>([]);
   const [punchLogs, setPunchLogs] = useState<PunchLog[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
-
   const [billet, setBillet] = useState<BilletData>(createNewBillet());
 
-  function createNewBillet(issuerName: string = ""): BilletData {
-    const now = new Date();
-    return {
-      id: `EV-${now.getFullYear()}${(now.getMonth() + 1).toString().padStart(2, "0")}-${Math.floor(
-        1000 + Math.random() * 8999
-      )}`,
-      date: now.toISOString().split("T")[0],
-      time: now.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }),
-      issuerName,
-      clientName: "",
-      provenance: "",
-      destination: "",
-      plaque: "",
-      typeSol: "",
-      quantite: "",
-      transporteur: "",
-      status: "pending",
-    };
-  }
-
-  // 1) Auth anonyme (pareil sur tous les téléphones)
+  // ✅ Auth (anonyme) pour tous les téléphones
   useEffect(() => {
     signInAnonymously(auth).catch(console.error);
   }, []);
 
-  // 2) SETTINGS live (doc unique) + création auto si absent
+  // ✅ SETTINGS en temps réel (doc unique)
   useEffect(() => {
-    return onSnapshot(SETTINGS_DOC, async (snap) => {
+    const ref = doc(db, "teams", TEAM_ID, "settings", "main");
+
+    return onSnapshot(ref, async (snap) => {
       if (snap.exists()) {
         setSettings(snap.data() as AppSettings);
       } else {
-        await setDoc(SETTINGS_DOC, DEFAULT_SETTINGS as any);
+        // 1ère fois: on écrit un default pour que tous les téléphones aient la base
+        await setDoc(ref, DEFAULT_SETTINGS);
         setSettings(DEFAULT_SETTINGS);
       }
     });
   }, []);
 
-  // 3) PUNCH LOGS live
+  // ✅ PUNCH LOGS en temps réel
   useEffect(() => {
-    const q = query(LOGS_COL, orderBy("createdAt", "asc"));
+    const q = query(collection(db, "teams", TEAM_ID, "logs"), orderBy("createdAt", "asc"));
     return onSnapshot(q, (snap) => {
-      const next = snap.docs.map((d) => ({ ...(d.data() as any), id: (d.data() as any).id ?? d.id })) as PunchLog[];
+      const next = snap.docs.map((d) => {
+        const data = d.data() as any;
+        const out: PunchLog = {
+          id: data.id ?? d.id,
+          employeeName: data.employeeName,
+          type: data.type,
+          timestamp: data.timestamp,
+          plaque: data.plaque,
+          lunchMinutes: data.lunchMinutes,
+        };
+        return out;
+      });
       setPunchLogs(next);
     });
   }, []);
 
-  // 4) HISTORY live (billets)
+  // ✅ HISTORY (billets) en temps réel
   useEffect(() => {
-    const q = query(HISTORY_COL, orderBy("createdAt", "desc"));
+    const q = query(collection(db, "teams", TEAM_ID, "history"), orderBy("date", "desc"));
     return onSnapshot(q, (snap) => {
-      const next = snap.docs.map((d) => ({ ...(d.data() as any), id: (d.data() as any).id ?? d.id })) as BilletData[];
+      const next = snap.docs.map((d) => ({ ...(d.data() as any), id: d.id })) as BilletData[];
       setHistory(next);
     });
   }, []);
 
-  // 5) APPROVALS live
+  // ✅ APPROVALS en temps réel
   useEffect(() => {
-    const q = query(APPROVALS_COL, orderBy("createdAt", "desc"));
+    const q = query(collection(db, "teams", TEAM_ID, "approvals"), orderBy("date", "desc"));
     return onSnapshot(q, (snap) => {
-      const next = snap.docs.map((d) => ({ ...(d.data() as any), id: (d.data() as any).id ?? d.id })) as ApprovalRecord[];
+      const next = snap.docs.map((d) => ({ ...(d.data() as any), id: d.id })) as ApprovalRecord[];
       setApprovals(next);
     });
   }, []);
 
+  // --- Helpers Permissions ---
   const hasPermission = (p: Permission) => currentUser?.permissions.includes(p);
 
   const isPunchedIn = () => {
@@ -223,38 +224,40 @@ const App: React.FC = () => {
 
     const parse = (ts: string) => {
       const clean = ts.replace(",", "").trim();
-      const parts = clean.split(/\s+/);
-      if (parts.length < 2) return 0;
-      const [d, t] = parts;
+      const [d, t] = clean.split(/\s+/);
       const [dd, mm, yyyy] = d.split("/").map(Number);
-      const [hh, min] = t.split(":").map(Number);
-      return new Date(yyyy, mm - 1, dd, hh || 0, min || 0).getTime();
+      const [hh, min, sec] = t.split(":").map(Number);
+      return new Date(yyyy, mm - 1, dd, hh || 0, min || 0, sec || 0).getTime();
     };
 
     const sorted = [...userLogs].sort((a, b) => parse(b.timestamp) - parse(a.timestamp));
     return sorted[0].type === "in";
   };
 
+  // --- LOGIN / LOGOUT ---
   const handleLogin = (user: UserAccount) => {
     setCurrentUser(user);
 
+    const isFreeAccess = ["admin", "surintendant", "chargée_de_projet"].includes(user.role);
+    if (isFreeAccess) {
+      setView("home");
+      return;
+    }
+
     const userLogs = punchLogs.filter((log) => log.employeeName === user.name);
+
     const parse = (ts: string) => {
       const clean = ts.replace(",", "").trim();
-      const parts = clean.split(/\s+/);
-      if (parts.length < 2) return 0;
-      const [d, t] = parts;
+      const [d, t] = clean.split(/\s+/);
       const [dd, mm, yyyy] = d.split("/").map(Number);
-      const [hh, min] = t.split(":").map(Number);
-      return new Date(yyyy, mm - 1, dd, hh || 0, min || 0).getTime();
+      const [hh, min, sec] = t.split(":").map(Number);
+      return new Date(yyyy, mm - 1, dd, hh || 0, min || 0, sec || 0).getTime();
     };
+
     const sorted = [...userLogs].sort((a, b) => parse(b.timestamp) - parse(a.timestamp));
-
     const currentlyIn = sorted.length > 0 && sorted[0].type === "in";
-    const isFreeAccess = ["admin", "surintendant", "chargée_de_projet"].includes(user.role);
 
-    if (!isFreeAccess && !currentlyIn) setView("punch");
-    else setView("home");
+    setView(currentlyIn ? "home" : "punch");
   };
 
   const handleLogout = () => {
@@ -262,12 +265,11 @@ const App: React.FC = () => {
     setView("login");
   };
 
-  // =========================
-  // ✅ FIRESTORE WRITES
-  // =========================
+  // --- SETTINGS (Firestore) ---
   const saveSettings = async (newSettings: AppSettings) => {
     setSettings(newSettings);
-    await setDoc(SETTINGS_DOC, newSettings as any, { merge: true });
+    const ref = doc(db, "teams", TEAM_ID, "settings", "main");
+    await setDoc(ref, newSettings, { merge: true });
   };
 
   const updateSettingsList = async (key: keyof Omit<AppSettings, "users">, newValue: string) => {
@@ -281,10 +283,55 @@ const App: React.FC = () => {
     await saveSettings(next);
   };
 
-  const savePunch = async (log: PunchLog) => {
-    // ✅ doc id = log.id (pas de doublons)
-    await setDoc(doc(LOGS_COL, log.id), { ...log, createdAt: serverTimestamp() } as any);
+  // --- BILLETS (Firestore) ---
+  const handleSaveBillet = (data: BilletData) => {
+    setBillet(data);
+    setView("preview");
+  };
 
+  const finalizeBillet = async () => {
+    // Doc ID = billet.id (pratique pour update/approve)
+    const ref = doc(db, "teams", TEAM_ID, "history", billet.id);
+    await setDoc(ref, { ...billet, status: "pending", createdAt: serverTimestamp() } as any, { merge: true });
+
+    alert("Billet créé et envoyé !");
+    setView("home");
+  };
+
+  const approveBillet = async (id: string, updatedData?: Partial<BilletData>) => {
+    const ref = doc(db, "teams", TEAM_ID, "history", id);
+    await updateDoc(ref, {
+      ...(updatedData || {}),
+      status: "approved",
+      approvalDate: new Date().toLocaleString("fr-FR"),
+      approverName: currentUser?.name || "",
+    } as any);
+  };
+
+  // --- APPROVALS (Firestore) ---
+  const handleApproveHours = async (employeeName: string, date: string, totalMs: number, lunchMs?: number) => {
+    const approval: ApprovalRecord = {
+      id: `APP-${Date.now()}`,
+      employeeName,
+      date,
+      totalMs,
+      lunchMs,
+      status: "approved",
+      approverName: currentUser?.name,
+      approvalDate: new Date().toLocaleString("fr-FR"),
+    };
+
+    // Doc ID = approval.id
+    const ref = doc(db, "teams", TEAM_ID, "approvals", approval.id);
+    await setDoc(ref, { ...approval, createdAt: serverTimestamp() } as any, { merge: true });
+  };
+
+  // --- PUNCH (Firestore) ---
+  const savePunch = async (log: PunchLog) => {
+    const ref = doc(db, "teams", TEAM_ID, "logs", log.id); // doc id stable
+    await setDoc(ref, { ...log, createdAt: serverTimestamp() } as any, { merge: true });
+
+    // si chauffeur et plaque nouvelle -> on met dans settings.plaques
     if (log.type === "in" && log.plaque && log.plaque.trim() !== "") {
       const normalizedValue = log.plaque.trim().toUpperCase();
       const targetUser = settings.users.find((u) => u.name === log.employeeName);
@@ -297,49 +344,27 @@ const App: React.FC = () => {
     if (log.type === "in" && !isPunchOnly) setView("home");
   };
 
-  const handleSaveBillet = (data: BilletData) => {
-    setBillet(data);
-    setView("preview");
-  };
+  // ✅ évite crash si settings pas encore arrivés
+  const safeSettings = useMemo(() => {
+    return {
+      ...settings,
+      users: settings?.users ?? [],
+      issuers: settings?.issuers ?? [],
+      clients: settings?.clients ?? [],
+      provenances: settings?.provenances ?? [],
+      destinations: settings?.destinations ?? [],
+      plaques: settings?.plaques ?? [],
+      typeSols: settings?.typeSols ?? [],
+      quantites: settings?.quantites ?? [],
+      transporteurs: settings?.transporteurs ?? [],
+    } as AppSettings;
+  }, [settings]);
 
-  const finalizeBillet = async () => {
-    // ✅ doc id = billet.id (update facile)
-    await setDoc(doc(HISTORY_COL, billet.id), { ...billet, createdAt: serverTimestamp() } as any);
-    alert("Billet créé et envoyé !");
-    setView("home");
-  };
+  // --- UI ---
+  if (view === "login") return <LoginView users={safeSettings.users} onLogin={handleLogin} />;
 
-  const approveBillet = async (id: string, updatedData?: Partial<BilletData>) => {
-    // ✅ update direct du doc history/{id}
-    await updateDoc(doc(HISTORY_COL, id), {
-      ...(updatedData || {}),
-      status: "approved",
-      approvalDate: new Date().toLocaleString(),
-      approverName: currentUser?.name,
-    } as any);
-  };
-
-  const handleApproveHours = async (employeeName: string, date: string, totalMs: number, lunchMs?: number) => {
-    const newApproval: ApprovalRecord = {
-      id: `APP-${Date.now()}`,
-      employeeName,
-      date,
-      totalMs,
-      lunchMs,
-      status: "approved",
-      approverName: currentUser?.name,
-      approvalDate: new Date().toLocaleString("fr-FR"),
-    };
-
-    await setDoc(doc(APPROVALS_COL, newApproval.id), { ...newApproval, createdAt: serverTimestamp() } as any);
-  };
-
-  // ✅ sécurité (évite crash si settings pas encore chargés)
-  const safeUsers = settings?.users ?? [];
   const activeSession = isPunchedIn();
   const isPunchOnly = currentUser?.permissions.length === 1 && currentUser.permissions[0] === "punch";
-
-  if (view === "login") return <LoginView users={safeUsers} onLogin={handleLogin} />;
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col max-w-md mx-auto shadow-2xl relative overflow-x-hidden border-x border-slate-200">
@@ -355,9 +380,7 @@ const App: React.FC = () => {
           <div className="mr-2 text-right">
             <div className="text-[8px] font-black uppercase opacity-50">Session</div>
             <div className="text-[10px] font-black text-[#76a73c] uppercase leading-none">{currentUser?.name}</div>
-            {currentUser?.group && (
-              <div className="text-[7px] font-black text-white/40 uppercase tracking-widest">{currentUser.group}</div>
-            )}
+            {currentUser?.group && <div className="text-[7px] font-black text-white/40 uppercase tracking-widest">{currentUser.group}</div>}
           </div>
 
           {view !== "home" && !isPunchOnly && (
@@ -402,7 +425,10 @@ const App: React.FC = () => {
 
             <div className="grid gap-4">
               {hasPermission("punch") && (
-                <button onClick={() => setView("punch")} className="group bg-white p-6 rounded-[2rem] border-2 border-slate-200 hover:border-blue-500 shadow-sm flex items-center gap-5 transition-all active:scale-95">
+                <button
+                  onClick={() => setView("punch")}
+                  className="group bg-white p-6 rounded-[2rem] border-2 border-slate-200 hover:border-blue-500 shadow-sm flex items-center gap-5 transition-all active:scale-95"
+                >
                   <div className="bg-blue-600 p-4 rounded-2xl text-white shadow-lg">
                     <Clock className="w-8 h-8" />
                   </div>
@@ -500,7 +526,7 @@ const App: React.FC = () => {
         {view === "approval_pending" && (
           <ApprovalPendingView
             logs={punchLogs}
-            users={settings.users}
+            users={safeSettings.users}
             approvals={approvals}
             onApprove={handleApproveHours}
             onBack={() => setView("approval_menu")}
@@ -513,7 +539,7 @@ const App: React.FC = () => {
         {view === "approval_summary" && (
           <ApprovalSummaryView
             logs={punchLogs}
-            users={settings.users}
+            users={safeSettings.users}
             approvals={approvals}
             onBack={() => setView("approval_menu")}
             currentUser={currentUser}
@@ -532,7 +558,10 @@ const App: React.FC = () => {
             </div>
 
             <div className="grid gap-4">
-              <button onClick={() => setView("punch_report")} className="flex items-center justify-between p-6 bg-white border-2 border-slate-200 rounded-3xl hover:border-[#76a73c] transition-all active:scale-95 shadow-sm group">
+              <button
+                onClick={() => setView("punch_report")}
+                className="flex items-center justify-between p-6 bg-white border-2 border-slate-200 rounded-3xl hover:border-[#76a73c] transition-all active:scale-95 shadow-sm group"
+              >
                 <div className="flex items-center gap-4">
                   <div className="bg-slate-100 p-3 rounded-2xl text-slate-600 group-hover:bg-[#76a73c] group-hover:text-white transition-colors">
                     <CalendarCheck className="w-6 h-6" />
@@ -542,7 +571,10 @@ const App: React.FC = () => {
                 <ChevronRight className="w-5 h-5 text-slate-300 group-hover:text-black mt-1" />
               </button>
 
-              <button onClick={() => setView("driver_compilation")} className="flex items-center justify-between p-6 bg-white border-2 border-slate-200 rounded-3xl hover:border-black transition-all active:scale-95 shadow-sm group">
+              <button
+                onClick={() => setView("driver_compilation")}
+                className="flex items-center justify-between p-6 bg-white border-2 border-slate-200 rounded-3xl hover:border-black transition-all active:scale-95 shadow-sm group"
+              >
                 <div className="flex items-center gap-4">
                   <div className="bg-slate-100 p-3 rounded-2xl text-slate-600 group-hover:bg-black group-hover:text-white transition-colors">
                     <UserCircle className="w-6 h-6" />
@@ -552,7 +584,10 @@ const App: React.FC = () => {
                 <ChevronRight className="w-5 h-5 text-slate-300 group-hover:text-black mt-1" />
               </button>
 
-              <button onClick={() => setView("approved_compilation")} className="flex items-center justify-between p-6 bg-white border-2 border-slate-200 rounded-3xl hover:border-[#76a73c] transition-all active:scale-95 shadow-sm group">
+              <button
+                onClick={() => setView("approved_compilation")}
+                className="flex items-center justify-between p-6 bg-white border-2 border-slate-200 rounded-3xl hover:border-[#76a73c] transition-all active:scale-95 shadow-sm group"
+              >
                 <div className="flex items-center gap-4">
                   <div className="bg-slate-100 p-3 rounded-2xl text-slate-600 group-hover:bg-[#76a73c] group-hover:text-white transition-colors">
                     <Library className="w-6 h-6" />
@@ -563,7 +598,10 @@ const App: React.FC = () => {
               </button>
 
               {hasPermission("reports") && (
-                <button onClick={() => setView("report_view")} className="flex items-center justify-between p-6 bg-white border-2 border-slate-200 rounded-3xl hover:border-black transition-all active:scale-95 shadow-sm group">
+                <button
+                  onClick={() => setView("report_view")}
+                  className="flex items-center justify-between p-6 bg-white border-2 border-slate-200 rounded-3xl hover:border-black transition-all active:scale-95 shadow-sm group"
+                >
                   <div className="flex items-center gap-4">
                     <div className="bg-slate-100 p-3 rounded-2xl text-slate-600 group-hover:bg-black group-hover:text-white transition-colors">
                       <FileBarChart className="w-6 h-6" />
@@ -577,11 +615,19 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {view === "driver_compilation" && <DriverCompilationView logs={punchLogs} users={settings.users} history={history} approvals={approvals} onBack={() => setView("archives")} />}
-        {view === "approved_compilation" && <ApprovedCompilationView history={history} onBack={() => setView("archives")} />}
-        {view === "punch_report" && <PunchReportView logs={punchLogs} users={settings.users} history={history} approvals={approvals} onBack={() => setView("archives")} />}
+        {view === "driver_compilation" && (
+          <DriverCompilationView logs={punchLogs} users={safeSettings.users} history={history} approvals={approvals} onBack={() => setView("archives")} />
+        )}
 
-        {view === "punch" && <PunchView settings={settings} logs={punchLogs} history={history} onPunch={savePunch} onBack={() => setView("home")} currentUser={currentUser} />}
+        {view === "approved_compilation" && <ApprovedCompilationView history={history} onBack={() => setView("archives")} />}
+
+        {view === "punch_report" && (
+          <PunchReportView logs={punchLogs} users={safeSettings.users} history={history} approvals={approvals} onBack={() => setView("archives")} />
+        )}
+
+        {view === "punch" && (
+          <PunchView settings={safeSettings} logs={punchLogs} history={history} onPunch={savePunch} onBack={() => setView("home")} currentUser={currentUser} />
+        )}
 
         {view === "envoi" && (
           <div className="p-4 animate-in slide-in-from-right duration-300">
@@ -590,15 +636,15 @@ const App: React.FC = () => {
             </button>
             <BilletForm
               data={billet}
-              settings={settings}
+              settings={safeSettings}
               onSave={handleSaveBillet}
-              onAddSettingOption={updateSettingsList}
-              onRemoveSettingOption={removeSettingsOption}
+              onAddSettingOption={updateSettingsList as any}
+              onRemoveSettingOption={removeSettingsOption as any}
             />
           </div>
         )}
 
-        {view === "reception" && <ReceptionView history={history} settings={settings} onApprove={approveBillet} onBack={() => setView("home")} />}
+        {view === "reception" && <ReceptionView history={history} settings={safeSettings} onApprove={approveBillet} onBack={() => setView("home")} />}
 
         {view === "preview" && (
           <div className="p-4 animate-in zoom-in-95 duration-300">
@@ -606,7 +652,10 @@ const App: React.FC = () => {
               <ArrowLeft className="w-4 h-4" /> Modifier
             </button>
             <BilletPreview data={billet} />
-            <button onClick={finalizeBillet} className="w-full mt-6 py-4 bg-[#76a73c] text-white font-black uppercase italic rounded-xl shadow-lg flex items-center justify-center gap-2 active:scale-95 transition-transform">
+            <button
+              onClick={finalizeBillet}
+              className="w-full mt-6 py-4 bg-[#76a73c] text-white font-black uppercase italic rounded-xl shadow-lg flex items-center justify-center gap-2 active:scale-95 transition-transform"
+            >
               <Download className="w-5 h-5" /> Confirmer & Créer
             </button>
           </div>
@@ -617,13 +666,7 @@ const App: React.FC = () => {
             <button onClick={() => setView("archives")} className="mb-4 text-[10px] font-black uppercase bg-slate-200 px-3 py-1.5 rounded-lg">
               Retour Données
             </button>
-            <ProvenanceView
-              history={history}
-              onSelectBillet={(h) => {
-                setBillet(h);
-                setView("preview");
-              }}
-            />
+            <ProvenanceView history={history} onSelectBillet={(h) => { setBillet(h); setView("preview"); }} />
           </div>
         )}
 
@@ -634,7 +677,7 @@ const App: React.FC = () => {
             <button onClick={() => setView("home")} className="mb-4 text-xs font-black uppercase flex items-center gap-1">
               <ArrowLeft className="w-4 h-4" /> Retour
             </button>
-            <SettingsView settings={settings} onSave={(s) => { saveSettings(s); setView("home"); }} />
+            <SettingsView settings={safeSettings} onSave={async (s) => { await saveSettings(s); setView("home"); }} />
           </div>
         )}
       </main>
