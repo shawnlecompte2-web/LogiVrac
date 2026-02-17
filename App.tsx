@@ -17,6 +17,9 @@ import ApprovalSummaryView from './components/ApprovalSummaryView';
 import ApprovedCompilationView from './components/ApprovedCompilationView';
 import DriverCompilationView from './components/DriverCompilationView';
 import { History, Settings, ArrowLeft, Download, MapPin, FileBarChart, Truck, CheckCircle, Clock, LayoutDashboard, Lock, LogOut, AlertTriangle, ClipboardList, ChevronRight, CalendarCheck, UserCheck, Library, UserCircle } from 'lucide-react';
+import { auth, db } from "./firebase";
+import { signInAnonymously } from "firebase/auth";
+import { collection, addDoc, onSnapshot, query, orderBy, serverTimestamp } from "firebase/firestore";
 
 const FULL_ACCESS: Permission[] = ['punch', 'envoi', 'reception', 'history', 'provenance', 'reports', 'settings', 'approval'];
 
@@ -79,6 +82,10 @@ const App: React.FC = () => {
   const [punchLogs, setPunchLogs] = useState<PunchLog[]>([]);
   const [approvals, setApprovals] = useState<ApprovalRecord[]>([]);
   const [billet, setBillet] = useState<BilletData>(createNewBillet());
+
+  useEffect(() => {
+    signInAnonymously(auth).catch(console.error);
+  }, []);
 
   function createNewBillet(issuerName: string = ''): BilletData {
     const now = new Date();
